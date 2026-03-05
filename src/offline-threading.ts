@@ -6,6 +6,12 @@ import type {
   PendingMessage,
   ThreadingDecider
 } from "./threading-core";
+import {
+  ThreadingRuntime,
+  type AppliedAssignment,
+  type ThreadingLifecycleTransition,
+  type ThreadingStore
+} from "./threading-engine";
 import type { AssignmentDecision, ThreadCandidate, ThreadState } from "./types";
 
 export interface OfflineMessageInput {
@@ -63,6 +69,11 @@ export interface OfflineThreadingOptions {
   mergeCandidateLimit?: number;
 }
 
+interface OfflinePendingMessage extends PendingMessage {
+  file_key: string;
+  line_id: number;
+}
+
 function parseEpochMs(input: string): number {
   const value = Date.parse(input);
   if (Number.isFinite(value)) {
@@ -71,10 +82,7 @@ function parseEpochMs(input: string): number {
   throw new Error(`Invalid timestamp: ${input}`);
 }
 
-function compareByRecencyDesc(
-  aIso: string | null,
-  bIso: string | null
-): number {
+function compareByRecencyDesc(aIso: string | null, bIso: string | null): number {
   const a = aIso ? parseEpochMs(aIso) : 0;
   const b = bIso ? parseEpochMs(bIso) : 0;
   return b - a;
@@ -84,8 +92,7 @@ function toISO(epochMs: number): string {
   return new Date(epochMs).toISOString();
 }
 
-export class OfflineThreadingSystem {
-  private readonly core: ThreadingCore;
+class OfflineThreadingStore implements ThreadingStore {
   private readonly activeToCoolingMs: number;
   private readonly coolingToArchivedMs: number;
   private readonly maxActiveThreadCandidates: number;
@@ -93,28 +100,31 @@ export class OfflineThreadingSystem {
   private readonly mergeCandidateLimit: number;
 
   private nextThreadId = 1;
+  private readonly queue: OfflinePendingMessage[] = [];
+  private readonly pendingById = new Map<string, OfflinePendingMessage>();
   private readonly messages: OfflineMessageRecord[] = [];
   private readonly messageById = new Map<string, OfflineMessageRecord>();
   private readonly threads = new Map<string, OfflineThreadRecord>();
+  private readonly assignments: OfflineAssignment[] = [];
+  private readonly failures: Array<{ messageId: string; note: string }> = [];
 
-  constructor(decider: ThreadingDecider, options: OfflineThreadingOptions = {}) {
-    this.core = new ThreadingCore(decider, {
-      mode: options.decisionMode ?? "strict_ai"
-    });
-    this.activeToCoolingMs =
-      (options.activeToCoolingMinutes ?? 30) * 60 * 1000;
-    this.coolingToArchivedMs =
-      (options.coolingToArchivedHours ?? 72) * 60 * 60 * 1000;
+  constructor(options: OfflineThreadingOptions = {}) {
+    this.activeToCoolingMs = (options.activeToCoolingMinutes ?? 30) * 60 * 1000;
+    this.coolingToArchivedMs = (options.coolingToArchivedHours ?? 72) * 60 * 60 * 1000;
     this.maxActiveThreadCandidates = options.maxActiveThreadCandidates ?? 15;
     this.maxArchivedThreadCandidates = options.maxArchivedThreadCandidates ?? 20;
     this.mergeCandidateLimit = options.mergeCandidateLimit ?? 16;
   }
 
-  async run(messages: OfflineMessageInput[]): Promise<OfflineThreadingResult> {
+  load(messages: OfflineMessageInput[]): void {
     this.nextThreadId = 1;
+    this.queue.length = 0;
+    this.pendingById.clear();
     this.messages.length = 0;
     this.messageById.clear();
     this.threads.clear();
+    this.assignments.length = 0;
+    this.failures.length = 0;
 
     const normalized = [...messages]
       .map((message, index) => this.normalizeMessage(message, index))
@@ -130,88 +140,42 @@ export class OfflineThreadingSystem {
         return a.line_id - b.line_id;
       });
 
-    const assignments: OfflineAssignment[] = [];
-    for (const pending of normalized) {
-      this.applyLifecycleTransitions(pending.created_at);
-
-      const activeCandidates = this.fetchActiveThreadCandidates();
-      const decision = await this.core.decideAssignment(pending, activeCandidates);
-      const archivedCandidates =
-        decision.action === "create" ? this.fetchArchivedThreadCandidates() : [];
-      const revivalSourceId =
-        decision.action === "create"
-          ? await this.core.decideRevivalSource(pending, archivedCandidates)
-          : null;
-
-      const applied = this.applyAssignment(pending, decision, revivalSourceId);
-      assignments.push({
-        message_id: pending.id,
-        file_key: pending.file_key,
-        line_id: pending.line_id,
-        thread_id: applied.threadId,
-        created_thread_id: applied.createdThreadId,
-        decision,
-        revival_source_id: revivalSourceId
-      });
-
-      await this.tryMergeThreads(pending.created_at);
+    this.queue.push(...normalized);
+    for (const message of normalized) {
+      this.pendingById.set(message.id, message);
     }
+  }
 
+  result(): OfflineThreadingResult {
     return {
       messages: [...this.messages],
       threads: [...this.threads.values()],
-      assignments
+      assignments: [...this.assignments]
     };
   }
 
-  private normalizeMessage(
-    message: OfflineMessageInput,
-    index: number
-  ): PendingMessage & Pick<OfflineMessageInput, "file_key" | "line_id"> {
-    if (!Number.isInteger(message.line_id) || message.line_id < 0) {
-      throw new Error(`line_id must be a non-negative integer: ${message.line_id}`);
-    }
-
-    const id = message.id?.trim() || `${message.file_key}:${message.line_id}:${index}`;
-    return {
-      id,
-      file_key: message.file_key,
-      line_id: message.line_id,
-      created_at: message.created_at,
-      author: message.author,
-      content: message.content
-    };
+  failureCount(): number {
+    return this.failures.length;
   }
 
-  private applyLifecycleTransitions(nowIso: string): void {
-    const nowMs = parseEpochMs(nowIso);
-
-    for (const thread of this.threads.values()) {
-      if (!thread.last_message_at) {
-        continue;
-      }
-      const lastMs = parseEpochMs(thread.last_message_at);
-
-      if (
-        thread.state === "active" &&
-        nowMs - lastMs >= this.activeToCoolingMs
-      ) {
-        thread.state = "cooling";
-        thread.updated_at = nowIso;
-      }
-
-      if (
-        thread.state === "cooling" &&
-        nowMs - lastMs >= this.coolingToArchivedMs
-      ) {
-        thread.state = "archived";
-        thread.archived_at = thread.archived_at ?? nowIso;
-        thread.updated_at = nowIso;
-      }
-    }
+  firstFailureNote(): string | null {
+    return this.failures[0]?.note ?? null;
   }
 
-  private fetchActiveThreadCandidates(): ThreadCandidate[] {
+  async claimPendingMessage(): Promise<PendingMessage | null> {
+    const next = this.queue.shift();
+    if (!next) {
+      return null;
+    }
+    this.applyLifecycleTransitions(next.created_at);
+    return next;
+  }
+
+  async markAssignmentFailed(messageId: string, note: string): Promise<void> {
+    this.failures.push({ messageId, note });
+  }
+
+  async fetchActiveThreadCandidates(): Promise<ThreadCandidate[]> {
     const rows = [...this.threads.values()]
       .filter((thread) => thread.state === "active" || thread.state === "cooling")
       .sort((a, b) =>
@@ -231,7 +195,7 @@ export class OfflineThreadingSystem {
     }));
   }
 
-  private fetchArchivedThreadCandidates(): ArchivedCandidate[] {
+  async fetchArchivedThreadCandidates(): Promise<ArchivedCandidate[]> {
     const rows = [...this.threads.values()]
       .filter((thread) => thread.state === "archived")
       .sort((a, b) =>
@@ -249,26 +213,14 @@ export class OfflineThreadingSystem {
     }));
   }
 
-  private renderRecentExcerpt(thread: OfflineThreadRecord, limit: number): string {
-    const items = [...thread.message_ids]
-      .map((id) => this.messageById.get(id))
-      .filter((message): message is OfflineMessageRecord => Boolean(message))
-      .sort(
-        (a, b) => parseEpochMs(b.created_at) - parseEpochMs(a.created_at)
-      )
-      .slice(0, limit)
-      .map((message) => message.content);
-
-    return items.join("\n");
-  }
-
-  private applyAssignment(
-    pending: PendingMessage & Pick<OfflineMessageInput, "file_key" | "line_id">,
+  async applyAssignment(
+    pending: PendingMessage,
     decision: AssignmentDecision,
     revivalSourceId: string | null
-  ): { threadId: string; createdThreadId: string | null } {
+  ): Promise<AppliedAssignment> {
     let threadId: string | null = decision.threadId;
     let createdThreadId: string | null = null;
+    let revivalLink: { oldId: string; newId: string } | null = null;
 
     if (decision.action === "create" || !threadId || !this.threads.has(threadId)) {
       const newThreadId = this.makeThreadId();
@@ -299,6 +251,7 @@ export class OfflineThreadingSystem {
           archived.continued_in_thread_id = newThreadId;
           archived.updated_at = pending.created_at;
           newThread.revives_thread_id = revivalSourceId;
+          revivalLink = { oldId: revivalSourceId, newId: newThreadId };
         }
       }
     }
@@ -312,10 +265,15 @@ export class OfflineThreadingSystem {
       throw new Error(`Assigned thread does not exist: ${threadId}`);
     }
 
+    const pendingMeta = this.pendingById.get(pending.id);
+    if (!pendingMeta) {
+      throw new Error(`Missing pending metadata for message ${pending.id}`);
+    }
+
     const messageRecord: OfflineMessageRecord = {
       id: pending.id,
-      file_key: pending.file_key,
-      line_id: pending.line_id,
+      file_key: pendingMeta.file_key,
+      line_id: pendingMeta.line_id,
       created_at: pending.created_at,
       author: pending.author,
       content: pending.content,
@@ -335,14 +293,25 @@ export class OfflineThreadingSystem {
     const incoming = parseEpochMs(pending.created_at);
     assignedThread.last_message_at = toISO(Math.max(currentLast, incoming));
 
+    this.assignments.push({
+      message_id: pending.id,
+      file_key: pendingMeta.file_key,
+      line_id: pendingMeta.line_id,
+      thread_id: threadId,
+      created_thread_id: createdThreadId,
+      decision,
+      revival_source_id: revivalSourceId
+    });
+
     return {
       threadId,
-      createdThreadId
+      createdThreadId,
+      revivalLink
     };
   }
 
-  private async tryMergeThreads(nowIso: string): Promise<void> {
-    const candidates: MergeCandidate[] = [...this.threads.values()]
+  async fetchMergeCandidates(): Promise<MergeCandidate[]> {
+    return [...this.threads.values()]
       .filter((thread) => thread.state === "active" || thread.state === "cooling")
       .sort((a, b) =>
         compareByRecencyDesc(
@@ -358,47 +327,31 @@ export class OfflineThreadingSystem {
         last_message_at: thread.last_message_at,
         recent_excerpt: this.renderRecentExcerpt(thread, 5)
       }));
+  }
 
-    const mergePlan = await this.core.decideMerge(candidates);
-    if (!mergePlan || !mergePlan.shouldMerge) {
-      return;
-    }
-
-    let sourceThreadId = mergePlan.sourceThreadId;
-    let targetThreadId = mergePlan.targetThreadId;
-
-    const sourceThread = this.threads.get(sourceThreadId);
-    const targetThread = this.threads.get(targetThreadId);
-    if (!sourceThread || !targetThread) {
-      return;
-    }
-    if (sourceThread.state === "superseded" || targetThread.state === "superseded") {
-      return;
-    }
-
-    const sourceLast = sourceThread.last_message_at ?? "";
-    const targetLast = targetThread.last_message_at ?? "";
-    if (sourceLast > targetLast) {
-      const originalTarget = targetThreadId;
-      targetThreadId = sourceThreadId;
-      sourceThreadId = originalTarget;
-    }
-
+  async applyMerge(sourceThreadId: string, targetThreadId: string): Promise<boolean> {
     if (sourceThreadId === targetThreadId) {
-      return;
+      return false;
     }
 
     const source = this.threads.get(sourceThreadId);
     const target = this.threads.get(targetThreadId);
     if (!source || !target) {
-      return;
+      return false;
     }
     if (!(source.state === "active" || source.state === "cooling")) {
-      return;
+      return false;
     }
     if (!(target.state === "active" || target.state === "cooling")) {
-      return;
+      return false;
     }
+
+    const nowIso = toISO(
+      Math.max(
+        parseEpochMs(source.last_message_at ?? source.updated_at),
+        parseEpochMs(target.last_message_at ?? target.updated_at)
+      )
+    );
 
     source.state = "superseded";
     source.merged_into_thread_id = target.id;
@@ -423,11 +376,102 @@ export class OfflineThreadingSystem {
     if (targetMessageTimes.length > 0) {
       target.last_message_at = toISO(Math.max(...targetMessageTimes));
     }
+
+    return true;
+  }
+
+  async transitionLifecycle(): Promise<ThreadingLifecycleTransition> {
+    return {
+      cooledThreadIds: [],
+      archivedThreadIds: []
+    };
+  }
+
+  private normalizeMessage(
+    message: OfflineMessageInput,
+    index: number
+  ): OfflinePendingMessage {
+    if (!Number.isInteger(message.line_id) || message.line_id < 0) {
+      throw new Error(`line_id must be a non-negative integer: ${message.line_id}`);
+    }
+
+    const id = message.id?.trim() || `${message.file_key}:${message.line_id}:${index}`;
+    return {
+      id,
+      file_key: message.file_key,
+      line_id: message.line_id,
+      created_at: message.created_at,
+      author: message.author,
+      content: message.content
+    };
+  }
+
+  private applyLifecycleTransitions(nowIso: string): void {
+    const nowMs = parseEpochMs(nowIso);
+
+    for (const thread of this.threads.values()) {
+      if (!thread.last_message_at) {
+        continue;
+      }
+      const lastMs = parseEpochMs(thread.last_message_at);
+
+      if (thread.state === "active" && nowMs - lastMs >= this.activeToCoolingMs) {
+        thread.state = "cooling";
+        thread.updated_at = nowIso;
+      }
+
+      if (thread.state === "cooling" && nowMs - lastMs >= this.coolingToArchivedMs) {
+        thread.state = "archived";
+        thread.archived_at = thread.archived_at ?? nowIso;
+        thread.updated_at = nowIso;
+      }
+    }
+  }
+
+  private renderRecentExcerpt(thread: OfflineThreadRecord, limit: number): string {
+    const items = [...thread.message_ids]
+      .map((id) => this.messageById.get(id))
+      .filter((message): message is OfflineMessageRecord => Boolean(message))
+      .sort((a, b) => parseEpochMs(b.created_at) - parseEpochMs(a.created_at))
+      .slice(0, limit)
+      .map((message) => message.content);
+
+    return items.join("\n");
   }
 
   private makeThreadId(): string {
     const value = this.nextThreadId;
     this.nextThreadId += 1;
     return `thread-${value.toString().padStart(6, "0")}`;
+  }
+}
+
+export class OfflineThreadingSystem {
+  private readonly runtime: ThreadingRuntime;
+  private readonly store: OfflineThreadingStore;
+
+  constructor(decider: ThreadingDecider, options: OfflineThreadingOptions = {}) {
+    const core = new ThreadingCore(decider, {
+      mode: options.decisionMode ?? "strict_ai"
+    });
+    this.store = new OfflineThreadingStore(options);
+    this.runtime = new ThreadingRuntime(core, this.store);
+  }
+
+  async run(messages: OfflineMessageInput[]): Promise<OfflineThreadingResult> {
+    this.store.load(messages);
+
+    while (await this.runtime.processSinglePendingMessage()) {
+      await this.runtime.runMergeCycle();
+    }
+
+    if (this.store.failureCount() > 0) {
+      throw new Error(
+        this.store.firstFailureNote() ??
+          "Offline threading run encountered assignment failures"
+      );
+    }
+
+    return this.store.result();
   }
 }

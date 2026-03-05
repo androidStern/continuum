@@ -83,10 +83,10 @@ npm start
 
 ## Offline Benchmark Replay
 
-The threading algorithm has a shared core that now runs in both:
+The threading system now uses one runtime code path with storage adapters:
 
-- the live app worker (Postgres-backed), and
-- an offline replay engine (in-memory) for benchmark runs.
+- live app: Postgres storage adapter + realtime events
+- benchmark replay: in-memory storage adapter
 
 Run IRC replay to generate a `predictions.graph.txt` file:
 
