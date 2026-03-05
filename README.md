@@ -81,6 +81,38 @@ npm run build
 npm start
 ```
 
+## Browser E2E Tests
+
+E2E tests run the real app + real Postgres + real browser automation.
+
+Prerequisites:
+
+- Docker Desktop (or docker daemon)
+- Playwright Chromium browser
+
+Install browser once:
+
+```bash
+npm run e2e:install
+```
+
+Run full E2E suite:
+
+```bash
+npm run e2e
+```
+
+What this does:
+
+- spins up Postgres with `docker compose`
+- boots the app server with fast polling settings
+- runs Playwright tests against the UI
+- tears everything down automatically
+
+Optional:
+
+- `E2E_ENABLE_AI=1 OPENAI_API_KEY=... npm run e2e` to force live OpenAI in the loop
+
 ## Offline Benchmark Replay
 
 The threading system now uses one runtime code path with storage adapters:
