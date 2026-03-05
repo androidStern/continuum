@@ -8,7 +8,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "check": "tsc --noEmit -p tsconfig.json",
-    "db:migrate": "tsx src/scripts/migrate.ts"
+    "db:migrate": "tsx src/scripts/migrate.ts",
+    "benchmark:irc": "tsx src/scripts/runIrcBenchmark.ts"
   },
   "keywords": [],
   "author": "Codex (GPT 5) <codex@openai.com>",

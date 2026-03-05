@@ -81,6 +81,25 @@ npm run build
 npm start
 ```
 
+## Offline Benchmark Replay
+
+The threading algorithm has a shared core that now runs in both:
+
+- the live app worker (Postgres-backed), and
+- an offline replay engine (in-memory) for benchmark runs.
+
+Run IRC replay to generate a `predictions.graph.txt` file:
+
+```bash
+npm run benchmark:irc -- \
+  --dataset-dir /path/to/dev \
+  --output /path/to/predictions.graph.txt \
+  --start-index 1000 \
+  --decision-mode strict_ai
+```
+
+`strict_ai` means AI calls are required and no heuristic fallback is used.
+
 ## API surface
 
 - `GET /health`
@@ -96,4 +115,3 @@ npm start
 - This is intentionally a raw UI with a functional backend.
 - For local npm issues on this machine, commands can be run with:
   `pkgx +node@20 npm <command>`.
-
