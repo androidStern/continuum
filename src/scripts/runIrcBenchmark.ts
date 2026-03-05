@@ -50,13 +50,9 @@ function parseArgs(argv: string[]): CliArgs {
     }
     if (token === "--decision-mode") {
       const value = argv[i + 1] ?? "";
-      if (
-        value !== "strict_ai" &&
-        value !== "ai_with_fallback" &&
-        value !== "heuristic_only"
-      ) {
+      if (value !== "strict_ai") {
         throw new Error(
-          "--decision-mode must be one of: strict_ai, ai_with_fallback, heuristic_only"
+          "--decision-mode must be strict_ai for benchmark runs (no fallback/no heuristics)"
         );
       }
       decisionMode = value;
@@ -188,7 +184,11 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const decider = new AIDecider();
 
-  if (args.decisionMode === "strict_ai" && !decider.enabled) {
+  if (args.decisionMode !== "strict_ai") {
+    throw new Error("Benchmark runs require strict_ai mode");
+  }
+
+  if (!decider.enabled) {
     throw new Error(
       "strict_ai mode requires OPENAI_API_KEY to be set so AI calls are mandatory"
     );

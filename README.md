@@ -53,6 +53,7 @@ PORT=3000
 DATABASE_URL=postgres://localhost/continuum
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4.1-mini
+DECISION_MODE=ai_with_fallback
 ACTIVE_TO_COOLING_MINUTES=30
 COOLING_TO_ARCHIVED_HOURS=72
 ASSIGNMENT_POLL_MS=1500
@@ -61,7 +62,11 @@ MAX_ACTIVE_THREAD_CANDIDATES=15
 MAX_ARCHIVED_THREAD_CANDIDATES=20
 ```
 
-If `OPENAI_API_KEY` is unset, the worker falls back to heuristic matching.
+`DECISION_MODE` controls assignment/merge behavior:
+
+- `ai_with_fallback` (default): use AI, fallback to heuristics on AI failure
+- `strict_ai`: require AI, no fallback
+- `heuristic_only`: no AI calls
 
 ## Run
 
@@ -99,19 +104,43 @@ npm run e2e:install
 Run full E2E suite:
 
 ```bash
-npm run e2e
+OPENAI_API_KEY=... npm run e2e
 ```
+
+E2E runs in strict AI mode and fails fast if `OPENAI_API_KEY` is missing.
 
 What this does:
 
 - spins up Postgres with `docker compose`
 - boots the app server with fast polling settings
+- forces `DECISION_MODE=strict_ai` so no heuristic fallback is used
 - runs Playwright tests against the UI
 - tears everything down automatically
 
 Optional:
 
-- `E2E_ENABLE_AI=1 OPENAI_API_KEY=... npm run e2e` to force live OpenAI in the loop
+- `ACTIVE_TO_COOLING_MINUTES=30 COOLING_TO_ARCHIVED_HOURS=72 OPENAI_API_KEY=... npm run e2e` to run
+  with production-like lifecycle windows (the E2E harness defaults to `0/0` so
+  archival/revival scenarios stay fast and deterministic in CI)
+
+## Integration Tests
+
+Integration tests run runtime logic against real adapters:
+
+- strict AI merge failure behavior using the offline runtime adapter
+- runtime + Postgres adapter assignment, revival-link, and merge flows
+
+Run:
+
+```bash
+npm run test:integration
+```
+
+What this does:
+
+- spins up Postgres with `docker compose`
+- runs Node integration tests with deterministic concurrency
+- tears everything down automatically
 
 ## Offline Benchmark Replay
 
@@ -130,7 +159,7 @@ npm run benchmark:irc -- \
   --decision-mode strict_ai
 ```
 
-`strict_ai` means AI calls are required and no heuristic fallback is used.
+Benchmark replay only accepts `strict_ai` so AI calls are mandatory and no heuristic fallback is used.
 
 ## API surface
 

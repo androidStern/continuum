@@ -11,6 +11,16 @@ DB_NAME="continuum_e2e"
 DB_USER="postgres"
 DB_PASSWORD="postgres"
 
+if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+  echo "OPENAI_API_KEY is required for e2e runs (strict AI mode; no heuristic fallback)"
+  exit 1
+fi
+
+if [[ -n "${DECISION_MODE:-}" && "${DECISION_MODE}" != "strict_ai" ]]; then
+  echo "E2E requires DECISION_MODE=strict_ai (no fallback/no heuristics)"
+  exit 1
+fi
+
 if ! command -v docker >/dev/null 2>&1; then
   echo "docker is required for e2e runs"
   exit 1
@@ -50,19 +60,11 @@ export PORT="$APP_PORT"
 export DATABASE_URL="postgres://${DB_USER}:${DB_PASSWORD}@127.0.0.1:${DB_PORT}/${DB_NAME}"
 export ASSIGNMENT_POLL_MS="${ASSIGNMENT_POLL_MS:-100}"
 export MERGE_POLL_MS="${MERGE_POLL_MS:-500}"
-export ACTIVE_TO_COOLING_MINUTES="${ACTIVE_TO_COOLING_MINUTES:-30}"
-export COOLING_TO_ARCHIVED_HOURS="${COOLING_TO_ARCHIVED_HOURS:-72}"
+export DECISION_MODE="strict_ai"
+export ACTIVE_TO_COOLING_MINUTES="${ACTIVE_TO_COOLING_MINUTES:-0}"
+export COOLING_TO_ARCHIVED_HOURS="${COOLING_TO_ARCHIVED_HOURS:-0}"
 export MAX_ACTIVE_THREAD_CANDIDATES="${MAX_ACTIVE_THREAD_CANDIDATES:-15}"
 export MAX_ARCHIVED_THREAD_CANDIDATES="${MAX_ARCHIVED_THREAD_CANDIDATES:-20}"
-
-if [[ "${E2E_ENABLE_AI:-0}" == "1" ]]; then
-  if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-    echo "E2E_ENABLE_AI=1 requires OPENAI_API_KEY"
-    exit 1
-  fi
-else
-  export OPENAI_API_KEY=""
-fi
 
 : > "$LOG_FILE"
 (

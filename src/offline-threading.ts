@@ -167,7 +167,6 @@ class OfflineThreadingStore implements ThreadingStore {
     if (!next) {
       return null;
     }
-    this.applyLifecycleTransitions(next.created_at);
     return next;
   }
 
@@ -381,10 +380,15 @@ class OfflineThreadingStore implements ThreadingStore {
   }
 
   async transitionLifecycle(): Promise<ThreadingLifecycleTransition> {
-    return {
-      cooledThreadIds: [],
-      archivedThreadIds: []
-    };
+    const nextPending = this.queue[0];
+    if (!nextPending) {
+      return {
+        cooledThreadIds: [],
+        archivedThreadIds: []
+      };
+    }
+
+    return this.applyLifecycleTransitions(nextPending.created_at);
   }
 
   private normalizeMessage(
@@ -406,8 +410,10 @@ class OfflineThreadingStore implements ThreadingStore {
     };
   }
 
-  private applyLifecycleTransitions(nowIso: string): void {
+  private applyLifecycleTransitions(nowIso: string): ThreadingLifecycleTransition {
     const nowMs = parseEpochMs(nowIso);
+    const cooledThreadIds: string[] = [];
+    const archivedThreadIds: string[] = [];
 
     for (const thread of this.threads.values()) {
       if (!thread.last_message_at) {
@@ -418,14 +424,21 @@ class OfflineThreadingStore implements ThreadingStore {
       if (thread.state === "active" && nowMs - lastMs >= this.activeToCoolingMs) {
         thread.state = "cooling";
         thread.updated_at = nowIso;
+        cooledThreadIds.push(thread.id);
       }
 
       if (thread.state === "cooling" && nowMs - lastMs >= this.coolingToArchivedMs) {
         thread.state = "archived";
         thread.archived_at = thread.archived_at ?? nowIso;
         thread.updated_at = nowIso;
+        archivedThreadIds.push(thread.id);
       }
     }
+
+    return {
+      cooledThreadIds,
+      archivedThreadIds
+    };
   }
 
   private renderRecentExcerpt(thread: OfflineThreadRecord, limit: number): string {
@@ -461,7 +474,12 @@ export class OfflineThreadingSystem {
   async run(messages: OfflineMessageInput[]): Promise<OfflineThreadingResult> {
     this.store.load(messages);
 
-    while (await this.runtime.processSinglePendingMessage()) {
+    while (true) {
+      await this.runtime.runLifecycleCycle();
+      const processed = await this.runtime.processSinglePendingMessage();
+      if (!processed) {
+        break;
+      }
       await this.runtime.runMergeCycle();
     }
 

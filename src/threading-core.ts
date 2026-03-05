@@ -305,11 +305,23 @@ export class ThreadingCore {
     }
 
     const validIds = new Set([pair.source.id, pair.target.id]);
-    if (!validIds.has(sourceThreadId) || !validIds.has(targetThreadId)) {
+    const hasInvalidMergeIds =
+      !validIds.has(sourceThreadId) || !validIds.has(targetThreadId);
+    if (hasInvalidMergeIds) {
+      if (this.mode === "strict_ai") {
+        throw new Error(
+          `AI merge decision returned invalid thread ids in strict mode (source=${sourceThreadId}, target=${targetThreadId}, expected one of ${pair.source.id} or ${pair.target.id}).`
+        );
+      }
       sourceThreadId = pair.source.id;
       targetThreadId = pair.target.id;
     }
     if (sourceThreadId === targetThreadId) {
+      if (this.mode === "strict_ai") {
+        throw new Error(
+          `AI merge decision returned identical source and target ids in strict mode (${sourceThreadId}).`
+        );
+      }
       shouldMerge = false;
     }
 

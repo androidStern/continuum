@@ -11,7 +11,8 @@
     "db:migrate": "tsx src/scripts/migrate.ts",
     "benchmark:irc": "tsx src/scripts/runIrcBenchmark.ts",
     "e2e:install": "playwright install chromium",
-    "e2e": "bash ./scripts/run-e2e.sh"
+    "e2e": "bash ./scripts/run-e2e.sh",
+    "test:integration": "bash ./scripts/run-integration.sh"
   },
   "keywords": [],
   "author": "Codex (GPT 5) <codex@openai.com>",

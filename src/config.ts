@@ -8,6 +8,9 @@ const envSchema = z.object({
   DATABASE_URL: z.string().default("postgres://localhost/continuum"),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().default("gpt-4.1-mini"),
+  DECISION_MODE: z
+    .enum(["strict_ai", "ai_with_fallback", "heuristic_only"])
+    .default("ai_with_fallback"),
   ACTIVE_TO_COOLING_MINUTES: z.coerce.number().default(30),
   COOLING_TO_ARCHIVED_HOURS: z.coerce.number().default(72),
   ASSIGNMENT_POLL_MS: z.coerce.number().default(1500),
@@ -30,4 +33,3 @@ export const config = {
   ...parsed.data,
   hasOpenAI: Boolean(parsed.data.OPENAI_API_KEY)
 };
-

@@ -42,7 +42,7 @@ export class ThreadingEngine {
   constructor(pool: Pool, realtimeHub: RealtimeHub) {
     const ai = new AIDecider();
     const core = new ThreadingCore(ai, {
-      mode: "ai_with_fallback"
+      mode: config.DECISION_MODE
     });
     const store = new PostgresThreadingStore(pool);
     const events = new RealtimeThreadingEvents(realtimeHub);
